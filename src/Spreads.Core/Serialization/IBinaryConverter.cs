@@ -14,12 +14,18 @@ namespace Spreads.Serialization
 
     /// <summary>
     /// Convert a generic object T to a pointer prefixed with version and length.
+    ///
+    /// Header gives additional information about known types. It could be skipped to save space
+    /// for arrays serialized incrementally by individual value. Bor binary the resulting layout
+    /// will be the same as array without compression. For JSON, each individual value is
+    /// length-prefixed in binary layout. It could be converted to JSON array layout by replacing
+    /// first length with `[   ` bytes and subsequent lengthes by `,   ` and will need a final `]`.
     /// </summary>
     /// <remarks>
     /// 0                   1                   2                   3
     /// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    /// |  Ver  |R|D|C|B|    TypeEnum   |  TypeSize     | SubTypeEnum   |
+    /// |  Ver  |R|D|C|B|    TypeEnum   |  TypeSize     | SubTypeEnum   | (header could be skipped)
     /// +---------------------------------------------------------------+
     /// |R|     Payload Length (if VarLen/TypeSize is negative )        |
     /// +---------------------------------------------------------------+
@@ -59,8 +65,9 @@ namespace Spreads.Serialization
         /// <param name="temporaryStream">A stream a value is serialized into if it is not possible to calculate serialized buffer size
         /// without actually performing serialization.</param>
         /// <param name="format">Preferred serialization format.</param>
+        /// <param name="skipHeader"></param>
         /// <returns></returns>
-        int SizeOf(in T value, out MemoryStream temporaryStream, SerializationFormat format = SerializationFormat.Binary);
+        int SizeOf(in T value, out MemoryStream temporaryStream, SerializationFormat format, bool skipHeader);
 
         /// <summary>
         /// Write serialized value to the buffer at offset if there is enough capacity.
@@ -69,15 +76,15 @@ namespace Spreads.Serialization
         /// <param name="pinnedDestination">A pinned pointer to a buffer to serialize the value into.</param>
         /// <param name="temporaryStream">A stream that was returned by SizeOf method. If it is not null then its content is written to the buffer.</param>
         /// <param name="format">Compression method.</param>
+        /// <param name="skipHeader"></param>
         /// <returns>Returns the number of bytes written to the destination buffer or a negative error code that corresponds to <see cref="BinaryConverterErrorCode"/>.</returns>
-        int Write(in T value, IntPtr pinnedDestination, MemoryStream temporaryStream = null, SerializationFormat format = SerializationFormat.Binary);
+        int Write(in T value, IntPtr pinnedDestination, MemoryStream temporaryStream, SerializationFormat format, bool skipHeader);
 
         /// <summary>
         /// Reads new value or fill existing value with data from the pointer,
         /// returns number of bytes read including any header.
         /// If not IsFixedSize, checks that version from the pointer equals the Version property.
         /// </summary>
-        int Read(IntPtr ptr, out T value);
-
+        int Read(IntPtr ptr, out T value, bool noHeader);
     }
 }

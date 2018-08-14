@@ -36,53 +36,60 @@ namespace Spreads.Serialization
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int SizeOf<T>(T value, out MemoryStream temporaryStream,
-            SerializationFormat format = SerializationFormat.Binary)
+            SerializationFormat format = SerializationFormat.Binary, bool skipHeader = false)
         {
-            return SizeOf(in value, out temporaryStream, format);
+            return SizeOf(in value, out temporaryStream, format, skipHeader);
         }
 
         /// <summary>
         /// Binary size of value T after serialization.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int SizeOf<T>(in T value, out MemoryStream temporaryStream, SerializationFormat format = SerializationFormat.Binary)
+        public static int SizeOf<T>(in T value, out MemoryStream temporaryStream,
+            SerializationFormat format = SerializationFormat.Binary, bool skipHeader = false)
         {
             if ((int)format < 100)
             {
-                var size = TypeHelper<T>.SizeOf(value, out temporaryStream, format);
+                var size = TypeHelper<T>.SizeOf(value, out temporaryStream, format, skipHeader);
                 if (size >= 0)
                 {
                     return size;
                 }
             }
 
-            return SizeOfSlow(value, out temporaryStream, format);
+            return SizeOfSlow(value, out temporaryStream, format, skipHeader);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static int SizeOfSlow<T>(T value, out MemoryStream temporaryStream, SerializationFormat format)
+        private static int SizeOfSlow<T>(T value, out MemoryStream temporaryStream, SerializationFormat format,
+            bool skipHeader)
         {
-            // NB when we request binary uncompressed but items are not fixed size we use uncompressed 
+            var prefixLength = skipHeader ? 4 : DataTypeHeader.Size + 4;
+
+            // NB when we request binary uncompressed but items are not fixed size we use uncompressed
             // JSON so that we could iterate over values as byte Spans/DirectBuffers without uncompressing
             if (format == SerializationFormat.Json || format == SerializationFormat.Binary)
             {
-                var rms = JsonSerializer.SerializeWithOffset(value, DataTypeHeader.Size + 4);
+                var rms = JsonSerializer.SerializeWithOffset(value, prefixLength);
                 rms.Position = 0;
-                var header = new DataTypeHeader
+                if (!skipHeader)
                 {
-                    // NB All defaults
-                    //VersionAndFlags =
-                    //{
-                    //    // Version = 0,
-                    //    // IsBinary = false,
-                    //    // IsDelta = false,
-                    //    // IsCompressed = false
-                    //},
-                    TypeEnum = VariantHelper<T>.TypeEnum
-                };
-                rms.WriteAsPtr(header);
+                    var header = new DataTypeHeader
+                    {
+                        // NB All defaults
+                        //VersionAndFlags =
+                        //{
+                        //    // Version = 0,
+                        //    // IsBinary = false,
+                        //    // IsDelta = false,
+                        //    // IsCompressed = false
+                        //},
+                        TypeEnum = VariantHelper<T>.TypeEnum
+                    };
+                    rms.WriteAsPtr(header);
+                }
 
-                rms.WriteAsPtr(checked((int)rms.Length - 8));
+                rms.WriteAsPtr(checked((int)rms.Length - prefixLength));
 
                 rms.Position = 0;
                 temporaryStream = rms;
@@ -90,13 +97,16 @@ namespace Spreads.Serialization
             }
             else
             {
-                // NB: fallback for failed binary uses Json.Deflate
+                // NB: fallback for failed compressed binary uses Json.Deflate
 
                 // uncompressed
                 var rms = JsonSerializer.SerializeWithOffset(value, 0);
                 var compressedStream =
                     RecyclableMemoryStreamManager.Default.GetStream(null, checked((int)rms.Length));
-                compressedStream.WriteAsPtr(0L);
+
+                compressedStream.SetLengthInternal(prefixLength);
+                compressedStream.PositionInternal = prefixLength;
+
                 using (var compressor = new DeflateStream(compressedStream, CompressionLevel.Optimal, true))
                 {
                     rms.Position = 0;
@@ -107,20 +117,26 @@ namespace Spreads.Serialization
                 rms.Dispose();
 
                 compressedStream.Position = 0;
-                var header = new DataTypeHeader
+
+                if (!skipHeader)
                 {
-                    VersionAndFlags =
+                    var header = new DataTypeHeader
                     {
-                        // NB Do not assign defaults
-                        // Version = 0,
-                        // IsBinary = false,
-                        // IsDelta = false,
-                        IsCompressed = true
-                    },
-                    TypeEnum = VariantHelper<T>.TypeEnum
-                };
-                compressedStream.WriteAsPtr(header);
-                compressedStream.WriteAsPtr(checked((int)compressedStream.Length - 8));
+                        VersionAndFlags =
+                        {
+                            // NB Do not assign defaults
+                            // Version = 0,
+                            // IsBinary = false,
+                            // IsDelta = false,
+                            IsCompressed = true
+                        },
+                        TypeEnum = VariantHelper<T>.TypeEnum
+                    };
+                    compressedStream.WriteAsPtr(header);
+                }
+
+                compressedStream.WriteAsPtr(checked((int)compressedStream.Length - prefixLength));
+
                 compressedStream.Position = 0;
                 temporaryStream = compressedStream;
                 return (checked((int)compressedStream.Length));
@@ -131,26 +147,27 @@ namespace Spreads.Serialization
         /// Destination must be pinned and have enough size.
         /// Unless writing to an "endless" buffer SizeOf must be called
         /// first to determine the size and prepare destination buffer.
-        /// For blittable types (Size >= 0) this method add 8 bytes header.
+        /// For blittable types (Size >= 0) this method add 4 bytes header unless skipHeader is true.
         /// Use Unsafe.WriteUnaligned() to write blittable types directly.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int WriteUnsafe<T>(in T value, IntPtr pinnedDestination,
             MemoryStream temporaryStream = null,
-            SerializationFormat format = SerializationFormat.Binary)
+            SerializationFormat format = SerializationFormat.Binary,
+            bool skipHeader = false)
         {
             if (TypeHelper<T>.Size >= 0 && (int)format < 100)
             {
                 Debug.Assert(temporaryStream == null, "For primitive types MemoryStream should not be used");
-                return TypeHelper<T>.Write(value, pinnedDestination, null, format);
+                return TypeHelper<T>.Write(value, pinnedDestination, null, format, skipHeader);
             }
-            return WriteSlow(in value, pinnedDestination, temporaryStream, format);
+            return WriteSlow(in value, pinnedDestination, temporaryStream, format, skipHeader);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static unsafe int WriteSlow<T>(in T value, IntPtr pinnedDestination,
-            MemoryStream temporaryStream = null,
-            SerializationFormat format = SerializationFormat.Binary)
+            MemoryStream temporaryStream,
+            SerializationFormat format, bool skipHeader)
         {
             if (value == null)
             {
@@ -161,7 +178,7 @@ namespace Spreads.Serialization
             {
                 Debug.Assert(temporaryStream.Position == 0);
 #if DEBUG
-                var checkSize = SizeOf(value, out MemoryStream tmp, format);
+                var checkSize = SizeOf(value, out MemoryStream tmp, format, skipHeader);
                 Debug.Assert(checkSize == temporaryStream.Length, "Memory stream length must be equal to the SizeOf");
                 tmp?.Dispose();
 #endif
@@ -175,43 +192,49 @@ namespace Spreads.Serialization
             {
                 if (TypeHelper<T>.Size > 0 || TypeHelper<T>.HasBinaryConverter)
                 {
-                    return TypeHelper<T>.Write(value, pinnedDestination, null, format);
+                    return TypeHelper<T>.Write(value, pinnedDestination, null, format, skipHeader);
                 }
             }
 
-            SizeOf(in value, out temporaryStream, format);
+            SizeOf(in value, out temporaryStream, format, skipHeader);
             if (temporaryStream == null)
             {
                 ThrowHelper.ThrowInvalidOperationException("Tempstream for Json or binary fallback must be returned from SizeOf");
             }
 
-            return WriteSlow(in value, pinnedDestination, temporaryStream, format);
+            return WriteSlow(in value, pinnedDestination, temporaryStream, format, skipHeader);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int Write<T>(T value, ref byte[] destination,
-            MemoryStream temporaryStream = null, SerializationFormat format = SerializationFormat.Binary)
+            MemoryStream temporaryStream = null,
+            SerializationFormat format = SerializationFormat.Binary,
+            bool skipHeader = false)
         {
             var asMemory = (Memory<byte>)destination;
-            return Write(in value, ref asMemory, temporaryStream, format);
+            return Write(in value, ref asMemory, temporaryStream, format, skipHeader);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int Write<T>(T value, ref Memory<byte> destination,
-            MemoryStream temporaryStream = null, SerializationFormat format = SerializationFormat.Binary)
+            MemoryStream temporaryStream = null,
+            SerializationFormat format = SerializationFormat.Binary,
+            bool skipHeader = false)
         {
-            return Write(in value, ref destination, temporaryStream, format);
+            return Write(in value, ref destination, temporaryStream, format, skipHeader);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static unsafe int Write<T>(in T value, ref Memory<byte> destination,
-            MemoryStream temporaryStream = null, SerializationFormat format = SerializationFormat.Binary)
+            MemoryStream temporaryStream = null,
+            SerializationFormat format = SerializationFormat.Binary,
+            bool skipHeader = false)
         {
             var capacity = destination.Length;
             int size;
             if (temporaryStream == null)
             {
-                size = SizeOf(in value, out temporaryStream, format);
+                size = SizeOf(in value, out temporaryStream, format, skipHeader);
             }
             else
             {
@@ -239,27 +262,44 @@ namespace Spreads.Serialization
 
             fixed (void* ptr = &destination.Span[0])
             {
-                return WriteUnsafe(value, (IntPtr)ptr, null, format);
+                return WriteUnsafe(value, (IntPtr)ptr, null, format, skipHeader);
             }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static unsafe int Read<T>(IntPtr ptr, out T value)
         {
+            var position = 0;
+
             var header = ReadUnaligned<DataTypeHeader>((void*)ptr);
 
-            if (header.VersionAndFlags.IsBinary)
+            if (header.VersionAndFlags.IsBinary || TypeHelper<T>.HasBinaryConverter)
             {
                 Debug.Assert(TypeHelper<T>.Size >= 0 || TypeHelper<T>.HasBinaryConverter);
                 return TypeHelper<T>.Read(ptr, out value);
             }
 
             var payloadSize = ReadUnaligned<int>((void*)(ptr + DataTypeHeader.Size));
-            return ReadSlow(ptr, out value, header, payloadSize);
+            return ReadSlow(ptr, out value, header, payloadSize, false);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static unsafe int Read<T>(IntPtr ptr, out T value, DataTypeHeader header)
+        {
+            var position = 0;
+
+            if (header.VersionAndFlags.IsBinary || TypeHelper<T>.HasBinaryConverter)
+            {
+                Debug.Assert(TypeHelper<T>.Size >= 0 || TypeHelper<T>.HasBinaryConverter);
+                return TypeHelper<T>.Read(ptr, out value, true);
+            }
+
+            var payloadSize = ReadUnaligned<int>((void*)(ptr));
+            return ReadSlow(ptr, out value, header, payloadSize, true);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static unsafe int ReadSlow<T>(IntPtr ptr, out T value, DataTypeHeader header, int payloadSize)
+        private static unsafe int ReadSlow<T>(IntPtr ptr, out T value, DataTypeHeader header, int payloadSize, bool noHeader)
         {
             if (header.VersionAndFlags.Version != 0)
             {
@@ -269,32 +309,36 @@ namespace Spreads.Serialization
                 return -1;
             }
 
+            var prefixLength = noHeader ? 4 : DataTypeHeader.Size + 4;
+
             if (!header.VersionAndFlags.IsCompressed)
             {
                 var buffer = BufferPool<byte>.Rent(payloadSize);
-                CopyBlockUnaligned(ref buffer[0], ref *(byte*)(ptr + DataTypeHeader.Size + 4), (uint)payloadSize);
+                CopyBlockUnaligned(ref buffer[0], ref *(byte*)(ptr + prefixLength), (uint)payloadSize);
                 var rms = RecyclableMemoryStream.Create(RecyclableMemoryStreamManager.Default, null,
                     payloadSize, buffer, payloadSize);
                 value = JsonSerializer.Deserialize<T>(rms);
                 rms.Dispose();
-                return payloadSize + DataTypeHeader.Size + 4;
+                return prefixLength + payloadSize;
             }
             else
             {
-                return ReadJsonCompressed(ptr, out value, payloadSize);
+                return ReadJsonCompressed(ptr, out value, payloadSize, noHeader);
             }
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static unsafe int ReadJsonCompressed<T>(IntPtr ptr, out T value, int payloadSize)
+        private static unsafe int ReadJsonCompressed<T>(IntPtr ptr, out T value, int payloadSize, bool noHeader)
         {
+            var prefixLength = noHeader ? 4 : DataTypeHeader.Size + 4;
+
+            // TODO rent from RMS
             var buffer = BufferPool<byte>.Rent(payloadSize);
-            CopyBlockUnaligned(ref buffer[0], ref *(byte*)(ptr + DataTypeHeader.Size + 4), (uint)payloadSize);
+            CopyBlockUnaligned(ref buffer[0], ref *(byte*)(ptr + prefixLength), (uint)payloadSize);
             var comrpessedStream = RecyclableMemoryStream.Create(RecyclableMemoryStreamManager.Default, null,
                 payloadSize, buffer, payloadSize);
 
-            RecyclableMemoryStream decompressedStream =
-                RecyclableMemoryStreamManager.Default.GetStream();
+            RecyclableMemoryStream decompressedStream = RecyclableMemoryStreamManager.Default.GetStream();
 
             using (var decompressor = new DeflateStream(comrpessedStream, CompressionMode.Decompress, true))
             {
@@ -304,8 +348,12 @@ namespace Spreads.Serialization
 
             comrpessedStream.Dispose();
             decompressedStream.Position = 0;
+
             value = JsonSerializer.Deserialize<T>(decompressedStream);
-            return payloadSize + DataTypeHeader.Size + 4;
+
+            decompressedStream.Dispose();
+
+            return prefixLength + payloadSize;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -327,7 +375,7 @@ namespace Spreads.Serialization
 
             try
             {
-                var len = checked((int) stream.Length);
+                var len = checked((int)stream.Length);
                 rms = RecyclableMemoryStreamManager.Default.GetStream(null, len, true);
 
                 try

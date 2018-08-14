@@ -373,12 +373,12 @@ namespace Spreads.Serialization
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int Read(IntPtr ptr, out T value)
+        public static int Read(IntPtr ptr, out T value, bool noHeader = false)
         {
             if (_hasBinaryConverter)
             {
                 Debug.Assert(Size == -1);
-                return _converterInstance.Read(ptr, out value);
+                return _converterInstance.Read(ptr, out value, noHeader);
             }
             if (Size >= 0)
             {
@@ -387,8 +387,9 @@ namespace Spreads.Serialization
                 var header = ReadUnaligned<DataTypeHeader>((void*)ptr);
                 Debug.Assert(header.Equals(_placeholder.Header));
 #endif
-                value = ReadUnaligned<T>((void*)(ptr + DataTypeHeader.Size));
-                return Size + DataTypeHeader.Size;
+                var offset = noHeader ? 0 : DataTypeHeader.Size;
+                value = ReadUnaligned<T>((void*)(ptr + offset));
+                return offset + Size;
             }
             Debug.Assert(Size < 0);
             ThrowHelper.FailFast("TypeHelper<T> doesn't support variable-size types. Code calling this method is incorrect, data corruption is possible.");
@@ -397,21 +398,30 @@ namespace Spreads.Serialization
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int Write(in T value, IntPtr destination, MemoryStream ms = null, SerializationFormat format = SerializationFormat.Binary)
+        public static int Write(in T value, IntPtr destination, MemoryStream ms = null,
+            SerializationFormat format = SerializationFormat.Binary, bool skipHeader = false)
         {
             if (_hasBinaryConverter)
             {
-                return _converterInstance.Write(value, destination, ms, format);
+                return _converterInstance.Write(value, destination, ms, format, skipHeader);
             }
             if (Size >= 0)
             {
                 Debug.Assert(Size > 0);
-                var len = DataTypeHeader.Size + Size;
-                // copy by value
-                var placeholder = _placeholder;
-                placeholder.Value = value;
-                WriteUnaligned((void*)(destination), placeholder);
-                // WriteUnaligned((void*)(destination + DataTypeHeader.Size), value);
+                var offset = skipHeader ? 0 : DataTypeHeader.Size;
+                var len = offset + Size;
+                if (!skipHeader)
+                {
+                    // copy by value
+                    var placeholder = _placeholder;
+                    placeholder.Value = value;
+                    WriteUnaligned((void*)(destination), placeholder);
+                }
+                else
+                {
+                    WriteUnaligned((void*)destination, value);
+                }
+
                 return len;
             }
 
@@ -420,16 +430,16 @@ namespace Spreads.Serialization
             return -1;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static int WriteFixedSize(in T value, IntPtr destination)
-        {
-            var len = DataTypeHeader.Size + Size;
-            // copy by value
-            var placeholder = _placeholder;
-            placeholder.Value = value;
-            WriteUnaligned((void*)(destination), placeholder);
-            return len;
-        }
+        //[MethodImpl(MethodImplOptions.AggressiveInlining)]
+        //internal static int WriteFixedSize(in T value, IntPtr destination)
+        //{
+        //    var len = DataTypeHeader.Size + Size;
+        //    // copy by value
+        //    var placeholder = _placeholder;
+        //    placeholder.Value = value;
+        //    WriteUnaligned((void*)(destination), placeholder);
+        //    return len;
+        //}
 
         /// <summary>
         /// Returns binary size of the value with header
@@ -437,19 +447,20 @@ namespace Spreads.Serialization
         /// <param name="value"></param>
         /// <param name="memoryStream"></param>
         /// <param name="format"></param>
+        /// <param name="skipHeader"></param>
         /// <returns></returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int SizeOf(T value, out MemoryStream memoryStream, SerializationFormat format)
+        public static int SizeOf(T value, out MemoryStream memoryStream, SerializationFormat format, bool skipHeader)
         {
             memoryStream = null;
             if (_hasBinaryConverter)
             {
                 Debug.Assert(Size == -1);
-                return _converterInstance.SizeOf(value, out memoryStream, format);
+                return _converterInstance.SizeOf(value, out memoryStream, format, skipHeader);
             }
             if (Size >= 0)
             {
-                return DataTypeHeader.Size + Size;
+                return (skipHeader ? 0 : DataTypeHeader.Size) + Size;
             }
             Debug.Assert(Size < 0);
             return -1;

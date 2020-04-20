@@ -3,9 +3,8 @@ using System.Diagnostics;
 using System.Runtime;
 using System.Threading;
 using System.Threading.Tasks;
-using Spreads.Core.Tests.Algorithms;
+using Spreads.Core.Tests.Buffers;
 using Spreads.Core.Tests.Collections.Concurrent;
-using Spreads.Core.Tests.Collections.Internal;
 using Spreads.Core.Tests.Serialization;
 
 namespace Spreads.Run
@@ -39,8 +38,8 @@ namespace Spreads.Run
             ExecutionContext.SuppressFlow();
             Settings.SharedSpinLockNotificationPort = 53412;
             
-            var test = new DataBlockTreeTests();
-            test.CouldAppendBench();
+            var test = new PrivateMemoryTests();
+            test.PrivateMemoryLayout();
             
             GC.Collect(2, GCCollectionMode.Forced, true, true);
 
